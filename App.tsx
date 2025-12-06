@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useRef } from 'react';
 import { Booking, BookingStatus } from './types';
 import { BookingForm } from './components/BookingForm';
@@ -7,6 +8,7 @@ import { Assistant } from './components/Assistant';
 import { CalendarView } from './components/CalendarView';
 import { STATUS_COLORS } from './constants';
 import { generateVoucher } from './utils/pdfGenerator';
+import { getAllBookings, saveBookingToDB, deleteBookingFromDB, bulkSaveBookings } from './utils/db';
 
 const App = () => {
   const [bookings, setBookings] = useState<Booking[]>([]);
@@ -18,36 +20,62 @@ const App = () => {
   const [view, setView] = useState<'dashboard' | 'list' | 'calendar'>('dashboard');
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Load from LocalStorage
+  // Load from DB (and migrate legacy LocalStorage if exists)
   useEffect(() => {
-    const saved = localStorage.getItem('hsh_bookings');
-    if (saved) {
+    const initializeData = async () => {
       try {
-        setBookings(JSON.parse(saved));
-      } catch (e) {
-        console.error("Failed to parse bookings", e);
+        // 1. Check for legacy data in LocalStorage
+        const legacyData = localStorage.getItem('hsh_bookings');
+        if (legacyData) {
+          try {
+            const parsed = JSON.parse(legacyData);
+            if (Array.isArray(parsed) && parsed.length > 0) {
+              console.log("Migrating legacy data to IndexedDB...");
+              await bulkSaveBookings(parsed);
+              localStorage.removeItem('hsh_bookings'); // Clean up legacy
+            }
+          } catch (e) {
+            console.error("Migration failed", e);
+          }
+        }
+
+        // 2. Load fresh data from IndexedDB
+        const dbData = await getAllBookings();
+        setBookings(dbData);
+      } catch (err) {
+        console.error("Failed to load bookings from DB:", err);
       }
-    }
+    };
+
+    initializeData();
   }, []);
 
-  // Save to LocalStorage
-  useEffect(() => {
-    localStorage.setItem('hsh_bookings', JSON.stringify(bookings));
-  }, [bookings]);
-
-  const handleSaveBooking = (booking: Booking) => {
-    if (editingBooking) {
-      setBookings(prev => prev.map(b => b.id === booking.id ? booking : b));
-    } else {
-      setBookings(prev => [...prev, booking]);
+  const handleSaveBooking = async (booking: Booking) => {
+    try {
+      await saveBookingToDB(booking);
+      
+      if (editingBooking) {
+        setBookings(prev => prev.map(b => b.id === booking.id ? booking : b));
+      } else {
+        setBookings(prev => [...prev, booking]);
+      }
+      setShowForm(false);
+      setEditingBooking(null);
+    } catch (error) {
+      alert("Failed to save booking to database.");
+      console.error(error);
     }
-    setShowForm(false);
-    setEditingBooking(null);
   };
 
-  const handleDelete = (id: string) => {
+  const handleDelete = async (id: string) => {
     if (confirm('Are you sure you want to delete this booking permanently?')) {
-      setBookings(prev => prev.filter(b => b.id !== id));
+      try {
+        await deleteBookingFromDB(id);
+        setBookings(prev => prev.filter(b => b.id !== id));
+      } catch (error) {
+        alert("Failed to delete booking.");
+        console.error(error);
+      }
     }
   };
 
@@ -72,12 +100,13 @@ const App = () => {
     if (!file) return;
 
     const reader = new FileReader();
-    reader.onload = (e) => {
+    reader.onload = async (e) => {
       try {
         const content = e.target?.result as string;
         const parsedData = JSON.parse(content);
         if (Array.isArray(parsedData)) {
           if (confirm(`Found ${parsedData.length} bookings in this file. This will REPLACE your current data. Are you sure?`)) {
+            await bulkSaveBookings(parsedData);
             setBookings(parsedData);
             setShowSettings(false);
             alert('Data imported successfully!');
@@ -361,7 +390,7 @@ const App = () => {
               </div>
 
               <div className="pt-4 border-t border-slate-100 text-center text-xs text-slate-400">
-                <p>Data is currently stored in your browser's LocalStorage.</p>
+                <p>Data is securely stored in your browser's IndexedDB database.</p>
               </div>
             </div>
           </div>
